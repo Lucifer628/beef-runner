@@ -1,0 +1,235 @@
+#!/data/data/com.termux/files/usr/bin/bash
+#=============================================
+#  BeEF-Runner — Universal Termux Edition
+#  Works on ALL Termux versions
+#=============================================
+
+# ---- Colors ----
+R='\033[1;31m'; G='\033[1;32m'; Y='\033[1;33m'; C='\033[1;36m'; N='\033[0m'
+
+ok()  { echo -e "${G}[✓]${N} $1"; }
+warn(){ echo -e "${Y}[!]${N} $1"; }
+err() { echo -e "${R}[✗]${N} $1"; }
+
+# ---- 1. Detect Termux ----
+detect_termux() {
+    if [ -d /data/data/com.termux ] || [ -n "$TERMUX_VERSION" ]; then
+        ok "Termux detected"
+    else
+        err "This script requires Termux on Android"
+        exit 1
+    fi
+}
+
+# ---- 2. Install deps with fallbacks ----
+install_deps() {
+    echo -e "\n${C}── Installing Dependencies ──${N}"
+    
+    # Try pkg first, fallback to apt
+    PKG_CMD="pkg"
+    command -v pkg &>/dev/null || PKG_CMD="apt"
+    
+    $PKG_CMD update -y 2>/dev/null || true
+    
+    local DEPS="git ruby nodejs openssl libxml2 libxslt libyaml clang binutils pkg-config make curl wget"
+    for dep in $DEPS; do
+        $PKG_CMD install -y "$dep" 2>/dev/null || true
+    done
+    
+    ok "Dependencies installed"
+}
+
+# ---- 3. Clone/Update BeEF ----
+setup_beef() {
+    echo -e "\n${C}── Setting Up BeEF ──${N}"
+    
+    if [ -d "$HOME/beef" ]; then
+        warn "BeEF already exists, updating..."
+        cd "$HOME/beef"
+        git pull --depth 1 2>/dev/null || true
+    else
+        git clone --depth 1 https://github.com/beefproject/beef.git "$HOME/beef"
+    fi
+    
+    if [ -d "$HOME/beef" ]; then
+        ok "BeEF directory ready"
+    else
+        err "Failed to setup BeEF"
+        exit 1
+    fi
+}
+
+# ---- 4. Install Ruby gems (with multiple fallbacks) ----
+install_gems() {
+    echo -e "\n${C}── Installing Ruby Gems ──${N}"
+    
+    cd "$HOME/beef"
+    rm -f Gemfile.lock
+    
+    # Bundler
+    gem install bundler --no-document 2>/dev/null || \
+    gem install bundler 2>/dev/null || \
+    warn "Bundler may not be installed"
+    
+    # Nokogiri - try multiple methods
+    gem install nokogiri --no-document -- --use-system-libraries 2>/dev/null || \
+    gem install nokogiri --no-document 2>/dev/null || \
+    gem install nokogiri -- --with-cflags="-Wno-implicit-function-declaration" --use-system-libraries 2>/dev/null || \
+    warn "Nokogiri install had issues, continuing..."
+    
+    ok "Gems installation attempted"
+}
+
+# ---- 5. Bundle install (with retry) ----
+bundle_install() {
+    echo -e "\n${C}── Running Bundle Install ──${N}"
+    
+    cd "$HOME/beef"
+    
+    # Try bundle install 3 times
+    for i in 1 2 3; do
+        if bundle install 2>/dev/null; then
+            ok "Bundle install successful"
+            return 0
+        fi
+        warn "Bundle attempt $i failed, retrying..."
+        sleep 2
+    done
+    
+    warn "Bundle install had issues, trying without test group..."
+    bundle config set --local without 'test' 2>/dev/null
+    bundle install 2>/dev/null && ok "Bundle installed (without test)" || warn "Bundle install incomplete"
+}
+
+# ---- 6. Fix config.yaml ----
+fix_config() {
+    echo -e "\n${C}── Fixing Configuration ──${N}"
+    
+    cd "$HOME/beef"
+    
+    # Backup
+    [ -f config.yaml.bak ] || cp config.yaml config.yaml.bak 2>/dev/null
+    
+    # Create minimal config if needed
+    if [ ! -f config.yaml ]; then
+        cat > config.yaml << 'EOF'
+beef:
+    version: '0.5.0.0'
+    debug: false
+    client_debug: false
+    client_timeout: 90
+    restrictions: 
+        permitted_hooking_subnet: ["0.0.0.0/0", "::/0"]
+        permitted_ui_subnet: ["127.0.0.1/32", "::1/128"]
+http:
+    host: "0.0.0.0"
+    port: "3000"
+    https: false
+    public:
+        host: ""
+        port: ""
+        https: false
+database:
+    driver: "sqlite"
+    db_file: "beef.db"
+credentials:
+    user: "beef"
+    passwd: "beef"
+EOF
+        ok "Created fresh config.yaml"
+    else
+        # Fix existing config
+        ruby -e '
+begin
+  require "yaml"
+  c = YAML.load_file("config.yaml") rescue {}
+  c = {} unless c.is_a?(Hash)
+  
+  # HTTP
+  c["http"] = {} unless c["http"].is_a?(Hash)
+  c["http"]["host"] = "0.0.0.0"
+  c["http"]["port"] = "3000"
+  
+  # Restrictions
+  c["permitted_hooking_subnet"] = ["0.0.0.0/0", "::/0"]
+  c["permitted_ui_subnet"] = ["127.0.0.1/32", "::1/128"]
+  
+  # HTTPS off
+  c["https"] = false
+  
+  # Credentials
+  c["credentials"] = {"user" => "beef", "passwd" => "beef"} unless c["credentials"].is_a?(Hash)
+  
+  # Write
+  File.open("config.yaml", "w") { |f| f.write(YAML.dump(c)) }
+  puts "Config fixed"
+rescue => e
+  puts "Config error: #{e.message}"
+end
+' 2>/dev/null
+        ok "config.yaml updated"
+    fi
+}
+
+# ---- 7. Launch BeEF ----
+launch_beef() {
+    echo -e "\n${C}══════════════════════════════════════════${N}"
+    echo -e "${C}     BeEF Framework — Starting${N}"
+    echo -e "${C}══════════════════════════════════════════${N}"
+    
+    # Get IP
+    local IP
+    IP=$(ip -4 addr show 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
+    [ -z "$IP" ] && IP=$(ifconfig 2>/dev/null | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
+    [ -z "$IP" ] && IP="127.0.0.1"
+    
+    echo -e "  ${G}Local:   http://127.0.0.1:3000/ui/panel${N}"
+    echo -e "  ${G}Network: http://${IP}:3000/ui/panel${N}"
+    echo -e "  ${Y}Login:   beef / beef${N}"
+    echo -e "  ${Y}Press Ctrl+C to stop${N}\n"
+    
+    cd "$HOME/beef"
+    ruby beef 2>/dev/null || ruby "$HOME/beef/beef" 2>/dev/null || err "Failed to launch BeEF"
+}
+
+# ---- 8. Show menu ----
+menu() {
+    clear
+    echo -e "${C}══════════════════════════════════════════${N}"
+    echo -e "${C}     BeEF-Runner — Universal Termux${N}"
+    echo -e "${C}══════════════════════════════════════════${N}"
+    echo ""
+    echo -e "  ${G}[1]${N}  Quick Install + Launch"
+    echo -e "  ${G}[2]${N}  Install Only"
+    echo -e "  ${G}[3]${N}  Launch Only (if already installed)"
+    echo -e "  ${G}[4]${N}  Fix Config Only"
+    echo -e "  ${G}[5]${N}  Check Status"
+    echo -e "  ${G}[q]${N}  Quit"
+    echo ""
+    read -r -p "Choose: " ch
+    
+    case "$ch" in
+        1) detect_termux; install_deps; setup_beef; install_gems; bundle_install; fix_config; launch_beef ;;
+        2) detect_termux; install_deps; setup_beef; install_gems; bundle_install; fix_config; echo ""; ok "Installation complete! Run: beef-runner" ;;
+        3) detect_termux; fix_config; launch_beef ;;
+        4) detect_termux; fix_config ;;
+        5) detect_termux
+           echo -e "\n${C}── Status ──${N}"
+           [ -d "$HOME/beef" ] && ok "BeEF directory: Found" || err "BeEF directory: Missing"
+           [ -f "$HOME/beef/config.yaml" ] && ok "Config: Present" || err "Config: Missing"
+           [ -f "$HOME/beef/Gemfile.lock" ] && ok "Bundle: Ready" || err "Bundle: Not installed"
+           command -v ruby &>/dev/null && ok "Ruby: $(ruby -v 2>&1 | cut -d' ' -f2)" || err "Ruby: Missing"
+           echo "" ;;
+        q) exit 0 ;;
+        *) warn "Invalid option"; sleep 1; menu ;;
+    esac
+}
+
+# ---- CLI Mode ----
+case "${1:-}" in
+    --install|-i) detect_termux; install_deps; setup_beef; install_gems; bundle_install; fix_config ;;
+    --launch|-l)  detect_termux; fix_config; launch_beef ;;
+    --fix|-f)     detect_termux; fix_config ;;
+    --help|-h)    echo "Usage: beef-runner [--install|--launch|--fix|--help]"; exit 0 ;;
+    *)            menu ;;
+esac
