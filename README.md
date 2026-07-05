@@ -6,3 +6,6 @@ git clone https://github.com/Lucifer628/beef-runner.git
 chmod +x beef-runner
 
 ./beef-runner
+
+# Disclaimer
+This project is intended solely for authorized security research, educational purposes, and testing in controlled environments (such as personal labs or sandboxes). Do not use it against systems or networks without explicit permission. The author is not responsible for any misuse.
